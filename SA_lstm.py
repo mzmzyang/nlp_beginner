@@ -92,14 +92,14 @@ class MySA(nn.Module):
     def __init__(self, vocb_size, emd_dim, hidden_size, layer_num, class_size):
         super(MySA, self).__init__()
         self.embedding = nn.Embedding(vocb_size, emd_dim)
-        self.myLSTM = nn.LSTM(emd_dim, hidden_size, layer_num, bidirectional=True)
-        self.liner = nn.Linear(hidden_size * 4, 20)
+        self.lstm = nn.LSTM(emd_dim, hidden_size, layer_num, dropout=0.3, bidirectional=True)
+        self.liner = nn.Linear(hidden_size * 4, 32)
         self.dropout = nn.Dropout(0.5)
-        self.predict = nn.Linear(20, class_size)
+        self.predict = nn.Linear(32, class_size)
 
     def forward(self, inputs):
         embed = self.embedding(inputs)
-        status, hidden = self.myLSTM(embed.permute(1, 0, 2))
+        status, hidden = self.lstm(embed.permute(1, 0, 2))
         encode = torch.cat((status[0], status[-1]), dim=1)
         out = self.liner(encode)
         out = self.dropout(out)
@@ -109,8 +109,8 @@ class MySA(nn.Module):
 
 LR = 0.01
 EPOCH = 5
-MAX_LENGTH = 25
-BATCH_SIZE = 128
+MAX_LENGTH = 32
+BATCH_SIZE = 256
 
 vocb_size, word2idx, idx2word, train_x, vali_x, train_y, vali_y, test_x = precess_dataset(MAX_LENGTH)
 train_x = torch.LongTensor(train_x)
@@ -121,7 +121,7 @@ test_x = torch.LongTensor(test_x)
 train_set = Data.TensorDataset(train_x, train_y)
 train_loader = Data.DataLoader(dataset=train_set, batch_size=BATCH_SIZE, shuffle=True)
 
-mySA = MySA(vocb_size, 20, 20, 1, 5)
+mySA = MySA(vocb_size, 32, 64, 1, 5)
 print(mySA)
 optimizer = torch.optim.Adam(mySA.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
