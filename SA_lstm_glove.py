@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data as Data
@@ -32,12 +33,6 @@ def vocab_list(train_data, validation_data, test_data):
     return list(set(word_list)), train_words, validation_words, test_words
 
 
-def transition(word_list):
-    word2idx = {word: idx + 1 for idx, word in enumerate(word_list)}
-    idx2word = {idx + 1: word for idx, word in enumerate(word_list)}
-    return word2idx, idx2word
-
-
 def encode_phrase(data, word2idx):
     encode_data = []
     for phrase in data:
@@ -64,6 +59,21 @@ def pad_phrase(encode_data, max_length):
     return pad_encode_data
 
 
+def get_glove(words_set):
+    glove = torch.zeros([len(words_set) + 1, 50])
+    word2idx = {}
+    word2idx['<unk>'] = 0
+    idx = 1
+    with open("./glove/glove.6B.50d.txt") as glove_file:
+        for line in glove_file:
+            temp = line.split()
+            if temp[0] in words_set:
+                glove[idx] = torch.from_numpy(np.array(temp[1:]).astype(np.float))
+                word2idx[temp[0]] = idx
+                idx = idx + 1
+    return word2idx, glove[:idx, :]
+
+
 def precess_dataset(max_length):
     train_dataset = pd.read_csv("./dataset/train.tsv", sep='\t')
     test_dataset = pd.read_csv("./dataset/test.tsv", sep='\t')
@@ -80,20 +90,21 @@ def precess_dataset(max_length):
 
     word_list, train_words, validation_words, test_words = vocab_list(train_phrase, validation_phrase, test_phrase)
     word_size = len(word_list) + 1
-    word2idx, idx2word = transition(word_list)
+    word2idx, glove = get_glove(set(word_list))
 
     train_x = pad_phrase(encode_phrase(train_words, word2idx), max_length)
     validation_x = pad_phrase(encode_phrase(validation_words, word2idx), max_length)
     test_x = pad_phrase(encode_phrase(test_words, word2idx), max_length)
 
-    return word_size + 1, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x
+    return len(word2idx), word2idx, glove, train_x, validation_x, train_y, validation_y, test_x
 
 
 class MySA(nn.Module):
-    def __init__(self, vocb_size, emd_dim, hidden_size, num_layers, class_size):
+    def __init__(self, vocb_size, emd_dim, hidden_size, num_layers, class_size, glove):
         super(MySA, self).__init__()
 
-        self.embedding = nn.Embedding(vocb_size, emd_dim)
+        # self.embedding = nn.Embedding(vocb_size, emd_dim)
+        self.embedding = nn.Embedding.from_pretrained(glove, freeze=False)
         self.lstm = nn.LSTM(input_size=emd_dim,
                             hidden_size=hidden_size,
                             num_layers=num_layers,
@@ -114,10 +125,10 @@ class MySA(nn.Module):
 
 LR = 0.01
 EPOCH = 3
-MAX_LENGTH = 32
-BATCH_SIZE = 256
+MAX_LENGTH = 16
+BATCH_SIZE = 128
 
-vocb_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
+vocb_size, word2idx, glove, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
 train_x = torch.LongTensor(train_x)
 train_y = torch.tensor(train_y)
 validation_x = torch.LongTensor(validation_x)
@@ -131,12 +142,14 @@ train_loader = Data.DataLoader(dataset=train_set,
 
 mySA = MySA(vocb_size=vocb_size,
             emd_dim=50,
-            hidden_size=32,
+            hidden_size=50,
             num_layers=1,
-            class_size=5)
+            class_size=5,
+            glove=glove)
 optimizer = torch.optim.Adam(mySA.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
-print(mySA)
+print(glove.size())
+print(mySA.embedding.weight.size())
 mySA.cuda()
 loss_func.cuda()
 
