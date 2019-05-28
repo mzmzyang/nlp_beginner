@@ -1,35 +1,30 @@
 import pandas as pd
+import re
 import torch
 import torch.nn as nn
 import torch.utils.data as Data
 
 
-def vocab_list(train_data, validation_data, test_data):
-    word_list = []
-    train_words = []
-    validation_words = []
-    test_words = []
-
-    for phrase in train_data:
-        t = []
+def vocab_list(phrase_data, word_set, is_test):
+    phrase_list = []
+    for phrase in phrase_data:
+        phrase = phrase.lower()
+        phrase = re.sub(r"\'s", " is", phrase)
+        phrase = re.sub(r"\'m", " am", phrase)
+        phrase = re.sub(r"\'re", " are", phrase)
+        phrase = re.sub(r"\'ve", " have", phrase)
+        phrase = re.sub(r"n\'t", " not", phrase)
+        phrase = re.sub(r"\'d", " wound", phrase)
+        phrase = re.sub(r"\'ll", " will", phrase)
+        phrase = re.sub(r"[^a-z]", " ", phrase)
+        temp = []
         for word in phrase.split(' '):
-            word_list.append(word.lower())
-            t.append(word.lower())
-        train_words.append(t)
+            temp.append(word)
+            if not is_test:
+                word_set.add(word)
+        phrase_list.append(temp)
 
-    for phrase in validation_data:
-        t = []
-        for word in phrase.split(' '):
-            word_list.append(word.lower())
-            t.append(word.lower())
-        validation_words.append(t)
-
-    for phrase in test_data:
-        t = []
-        for word in phrase.split(' '):
-            t.append(word.lower())
-        test_words.append(t)
-    return list(set(word_list)), train_words, validation_words, test_words
+    return phrase_list
 
 
 def transition(word_list):
@@ -78,25 +73,32 @@ def precess_dataset(max_length):
     validation_y = train_y[120000:]
     train_y = train_y[:120000]
 
-    word_list, train_words, validation_words, test_words = vocab_list(train_phrase, validation_phrase, test_phrase)
-    word_size = len(word_list) + 1
-    word2idx, idx2word = transition(word_list)
+    word_set = set()
+
+    train_words = vocab_list(train_phrase, word_set, False)
+    validation_words = vocab_list(validation_phrase, word_set, False)
+    test_words = vocab_list(test_phrase, word_set, True)
+
+    word_size = len(word_set) + 1
+
+    word2idx, idx2word = transition(word_set)
 
     train_x = pad_phrase(encode_phrase(train_words, word2idx), max_length)
     validation_x = pad_phrase(encode_phrase(validation_words, word2idx), max_length)
     test_x = pad_phrase(encode_phrase(test_words, word2idx), max_length)
 
-    return word_size + 1, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x
+    return word_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x
 
 
 class MySA(nn.Module):
-    def __init__(self, vocb_size, emd_dim, hidden_size, num_layers, class_size):
+    def __init__(self, vocb_size, emd_dim, hidden_size, num_layers, dropout, class_size):
         super(MySA, self).__init__()
 
         self.embedding = nn.Embedding(vocb_size, emd_dim)
         self.lstm = nn.LSTM(input_size=emd_dim,
                             hidden_size=hidden_size,
                             num_layers=num_layers,
+                            dropout=dropout,
                             bidirectional=True)
         self.liner = nn.Linear(hidden_size * 4, 32)
         self.dropout = nn.Dropout(0.5)
@@ -115,7 +117,7 @@ class MySA(nn.Module):
 LR = 0.01
 EPOCH = 3
 MAX_LENGTH = 32
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 
 vocb_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
 train_x = torch.LongTensor(train_x)
@@ -131,8 +133,9 @@ train_loader = Data.DataLoader(dataset=train_set,
 
 mySA = MySA(vocb_size=vocb_size,
             emd_dim=50,
-            hidden_size=32,
-            num_layers=1,
+            hidden_size=50,
+            num_layers=2,
+            dropout=0.1,
             class_size=5)
 optimizer = torch.optim.Adam(mySA.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
