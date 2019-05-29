@@ -1,7 +1,9 @@
 import pandas as pd
+import numpy as np
 import re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.data as Data
 
 
@@ -25,12 +27,6 @@ def vocab_list(phrase_data, word_set, is_test):
         phrase_list.append(temp)
 
     return phrase_list
-
-
-def transition(word_list):
-    word2idx = {word: idx + 1 for idx, word in enumerate(word_list)}
-    idx2word = {idx + 1: word for idx, word in enumerate(word_list)}
-    return word2idx, idx2word
 
 
 def encode_phrase(data, word2idx):
@@ -59,6 +55,21 @@ def pad_phrase(encode_data, max_length):
     return pad_encode_data
 
 
+def get_glove(words_set):
+    glove = torch.zeros([len(words_set) + 1, 50])
+    word2idx = {}
+    word2idx['<unk>'] = 0
+    idx = 1
+    with open("./glove/glove.6B.50d.txt") as glove_file:
+        for line in glove_file:
+            temp = line.split()
+            if temp[0] in words_set:
+                glove[idx] = torch.from_numpy(np.array(temp[1:]).astype(np.float))
+                word2idx[temp[0]] = idx
+                idx = idx + 1
+    return word2idx, glove[:idx, :]
+
+
 def precess_dataset(max_length):
     train_dataset = pd.read_csv("./dataset/train.tsv", sep='\t')
     test_dataset = pd.read_csv("./dataset/test.tsv", sep='\t')
@@ -79,49 +90,67 @@ def precess_dataset(max_length):
     validation_words = vocab_list(validation_phrase, word_set, False)
     test_words = vocab_list(test_phrase, word_set, True)
 
-    word_size = len(word_set) + 1
-
-    word2idx, idx2word = transition(word_set)
+    word2idx, glove = get_glove(word_set)
 
     train_x = pad_phrase(encode_phrase(train_words, word2idx), max_length)
     validation_x = pad_phrase(encode_phrase(validation_words, word2idx), max_length)
     test_x = pad_phrase(encode_phrase(test_words, word2idx), max_length)
 
-    return word_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x
+    return len(word2idx), word2idx, glove, train_x, validation_x, train_y, validation_y, test_x
 
 
 class MySA(nn.Module):
-    def __init__(self, vocb_size, emd_dim, hidden_size, num_layers, dropout, class_size):
+    def __init__(self, vocb_size, emd_dim, seq_len, dropout, class_size, glove):
         super(MySA, self).__init__()
 
         self.embedding = nn.Embedding(vocb_size, emd_dim)
-        self.lstm = nn.LSTM(input_size=emd_dim,
-                            hidden_size=hidden_size,
-                            num_layers=num_layers,
-                            dropout=dropout,
-                            bidirectional=True)
-        self.liner = nn.Linear(hidden_size * 4, hidden_size)
-        self.dropout = nn.Dropout(0.5)
-        self.relu = nn.ReLU(hidden_size)
-        self.predict = nn.Linear(hidden_size, class_size)
+        # self.embedding = nn.Embedding.from_pretrained(glove, freeze=False)
+        self.conv1 = nn.Conv2d(1, 1, (3, emd_dim))
+        self.conv2 = nn.Conv2d(1, 1, (4, emd_dim))
+        self.conv3 = nn.Conv2d(1, 1, (5, emd_dim))
+        self.conv4 = nn.Conv2d(1, 1, (6, emd_dim))
+        self.conv5 = nn.Conv2d(1, 1, (7, emd_dim))
+        self.conv6 = nn.Conv2d(1, 1, (8, emd_dim))
+
+        self.pool1 = nn.MaxPool2d((seq_len - 2, 1))
+        self.pool2 = nn.MaxPool2d((seq_len - 3, 1))
+        self.pool3 = nn.MaxPool2d((seq_len - 4, 1))
+        self.pool4 = nn.MaxPool2d((seq_len - 5, 1))
+        self.pool5 = nn.MaxPool2d((seq_len - 6, 1))
+        self.pool6 = nn.MaxPool2d((seq_len - 7, 1))
+
+        self.liner = nn.Linear(6, class_size)
 
     def forward(self, inputs):
         embed = self.embedding(inputs)
-        status, hidden = self.lstm(embed.permute(1, 0, 2))
-        encode = torch.cat((status[0], status[-1]), dim=1)
-        out = self.liner(encode)
-        out = self.dropout(out)
-        out = self.relu(out)
-        out = self.predict(out)
+        embed = embed.view(inputs.shape[0], 1, inputs.shape[1], -1)
+        x1 = F.relu(self.conv1(embed))
+        x2 = F.relu(self.conv2(embed))
+        x3 = F.relu(self.conv3(embed))
+        x4 = F.relu(self.conv4(embed))
+        x5 = F.relu(self.conv5(embed))
+        x6 = F.relu(self.conv6(embed))
+
+        x1 = self.pool1(x1)
+        x2 = self.pool2(x2)
+        x3 = self.pool3(x3)
+        x4 = self.pool4(x4)
+        x5 = self.pool5(x5)
+        x6 = self.pool6(x6)
+
+        x = torch.cat((x1, x2, x3, x4, x5, x6), -1)
+        x = x.view(inputs.shape[0], -1)
+
+        out = self.liner(x)
         return out
 
 
 LR = 0.01
 EPOCH = 3
-MAX_LENGTH = 32
+MAX_LENGTH = 36
 BATCH_SIZE = 128
 
-vocb_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
+vocb_size, word2idx, glove, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
 train_x = torch.LongTensor(train_x)
 train_y = torch.tensor(train_y)
 validation_x = torch.LongTensor(validation_x)
@@ -135,10 +164,11 @@ train_loader = Data.DataLoader(dataset=train_set,
 
 mySA = MySA(vocb_size=vocb_size,
             emd_dim=50,
-            hidden_size=32,
-            num_layers=2,
+            seq_len=MAX_LENGTH,
             dropout=0.1,
-            class_size=5)
+            class_size=5,
+            glove=glove)
+
 optimizer = torch.optim.Adam(mySA.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
 print(mySA)

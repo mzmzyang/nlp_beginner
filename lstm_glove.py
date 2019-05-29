@@ -109,9 +109,10 @@ class MySA(nn.Module):
                             num_layers=num_layers,
                             dropout=dropout,
                             bidirectional=True)
-        self.liner = nn.Linear(hidden_size * 4, 32)
+        self.liner = nn.Linear(hidden_size * 4, hidden_size)
         self.dropout = nn.Dropout(0.5)
-        self.predict = nn.Linear(32, class_size)
+        self.relu = nn.ReLU(hidden_size)
+        self.predict = nn.Linear(hidden_size, class_size)
 
     def forward(self, inputs):
         embed = self.embedding(inputs)
@@ -119,6 +120,7 @@ class MySA(nn.Module):
         encode = torch.cat((status[0], status[-1]), dim=1)
         out = self.liner(encode)
         out = self.dropout(out)
+        out = self.relu(out)
         out = self.predict(out)
         return out
 
