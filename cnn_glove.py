@@ -99,9 +99,9 @@ def precess_dataset(max_length):
     return len(word2idx), word2idx, glove, train_x, validation_x, train_y, validation_y, test_x
 
 
-class MySA(nn.Module):
+class myGloVeCNN(nn.Module):
     def __init__(self, vocb_size, emd_dim, seq_len, dropout, class_size, glove):
-        super(MySA, self).__init__()
+        super(myGloVeCNN, self).__init__()
 
         self.embedding = nn.Embedding(vocb_size, emd_dim)
         # self.embedding = nn.Embedding.from_pretrained(glove, freeze=False)
@@ -162,17 +162,17 @@ train_loader = Data.DataLoader(dataset=train_set,
                                batch_size=BATCH_SIZE,
                                shuffle=True)
 
-mySA = MySA(vocb_size=vocb_size,
+model = myGloVeCNN(vocb_size=vocb_size,
             emd_dim=50,
             seq_len=MAX_LENGTH,
             dropout=0.1,
             class_size=5,
             glove=glove)
 
-optimizer = torch.optim.Adam(mySA.parameters(), lr=LR)
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
-print(mySA)
-mySA.cuda()
+print(model)
+model.cuda()
 loss_func.cuda()
 
 for epoch in range(EPOCH):
@@ -180,26 +180,26 @@ for epoch in range(EPOCH):
         x = x.cuda()
         y = y.cuda()
 
-        pred_train = mySA(x)
+        pred_train = model(x)
         loss = loss_func(pred_train, y)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         if idx % 100 == 0:
-            mySA.eval()
+            model.eval()
             validation_x = validation_x.cuda()
             validation_y = validation_y.cuda()
 
-            pred_validation = mySA(validation_x)
+            pred_validation = model(validation_x)
             pred_output = torch.max(pred_validation, dim=1)[1]
             accuracy = float(torch.sum(pred_output == validation_y)) / float(validation_y.size(0))
             print('Epoch: ', epoch, '| train loss: %.4f' % loss.item(), '| validation accuracy: %.4f' % accuracy)
-            mySA.train()
+            model.train()
 
-mySA.eval()
+model.eval()
 test_x = test_x.cuda()
-pred_test = mySA(test_x)
+pred_test = model(test_x)
 
 pred_output = torch.max(pred_test, dim=1)[1]
 pred_output = pred_output.type(torch.int32)
