@@ -115,7 +115,7 @@ class SelfAttention(nn.Module):
         self.w_v = nn.Linear(input_dim, hid_dim)
 
         self.fc = nn.Linear(hid_dim, hid_dim)
-        self.scale = torch.sqrt(torch.FloatTensor([hid_dim // n_heads]))
+        self.scale = torch.sqrt(torch.FloatTensor([hid_dim // n_heads])).cuda()
 
     def forward(self, query, key, value):
         bsz = query.shape[0]
@@ -131,7 +131,7 @@ class SelfAttention(nn.Module):
         V = V.view(bsz, -1, self.n_heads, self.num_heads).permute(0, 2, 1, 3)
         # Q, K, V = [batch size, n heads, sent len, num_heads]
 
-        energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale.cuda()
+        energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale
         # energy = [batch size, n heads, sent len, sent len]
 
         attention = F.softmax(energy, dim=-1)
@@ -151,71 +151,36 @@ class SelfAttention(nn.Module):
         return x
 
 
-class PositionwiseFeedforward(nn.Module):
-    def __init__(self, hid_dim, pf_dim, dropout):
-        super().__init__()
-
-        self.hid_dim = hid_dim
-        self.pf_dim = pf_dim
-
-        self.fc_1 = nn.Conv1d(hid_dim, pf_dim, 1)
-        self.fc_2 = nn.Conv1d(pf_dim, hid_dim, 1)
-
-        self.do = nn.Dropout(dropout)
-
-    def forward(self, x):
-        # x = [batch size, sent len, hid dim]
-        x = x.permute(0, 2, 1)
-        # x = [batch size, hid dim, sent len]
-
-        x = self.do(F.relu(self.fc_1(x)))
-        # x = [batch size, ff dim, sent len]
-
-        x = self.fc_2(x)
-        # x = [batch size, hid dim, sent len]
-
-        x = x.permute(0, 2, 1)
-        # x = [batch size, sent len, hid dim]
-        return x
-
-
 class EncoderLayer(nn.Module):
-    def __init__(self, hid_dim, n_heads, pf_dim, self_attention, positionwise_feedforward, dropout):
+    def __init__(self, hid_dim, n_heads, self_attention, dropout):
         super().__init__()
         self.ln = nn.LayerNorm(hid_dim)
         self.sa = self_attention(hid_dim, hid_dim, n_heads)
-        self.pf = positionwise_feedforward(hid_dim, pf_dim, dropout)
         self.do = nn.Dropout(dropout)
 
     def forward(self, src):
         # src = [batch size, src sent len, hid dim]
-        # src_mask = [batch size, src sent len]
         src = self.ln(src + self.do(self.sa(src, src, src)))
-        src = self.ln(src + self.do(self.pf(src)))
         return src
 
 
 class Transformer(nn.Module):
-    def __init__(self, input_dim, hid_dim, n_layers, n_heads, pf_dim, encoder_layer, self_attention,
-                 positionwise_feedforward, dropout, glove, class_size, max_length):
+    def __init__(self, input_dim, hid_dim, n_layers, n_heads, encoder_layer, self_attention,
+                 dropout, glove, class_size, max_length):
         super().__init__()
 
         self.input_dim = input_dim
         self.hid_dim = hid_dim
         self.n_layers = n_layers
         self.n_heads = n_heads
-        self.pf_dim = pf_dim
-        self.scale = torch.sqrt(torch.FloatTensor([hid_dim])).cuda()
+
         self.encoder_layer = encoder_layer
         self.self_attention = self_attention
-        self.positionwise_feedforward = positionwise_feedforward
         self.dropout = dropout
-
         self.tok_embedding = nn.Embedding.from_pretrained(glove, freeze=False)
-        self.pos_embedding = nn.Embedding(max_length, hid_dim)
 
         self.layers = nn.ModuleList(
-            [encoder_layer(hid_dim, n_heads, pf_dim, self_attention, positionwise_feedforward, dropout)
+            [encoder_layer(hid_dim, n_heads, self_attention, dropout)
              for i in range(n_layers)])
 
         self.do = nn.Dropout(dropout)
@@ -224,8 +189,7 @@ class Transformer(nn.Module):
 
     def forward(self, src):
         # src = [batch size, src sent len]
-        pos = torch.arange(0, src.shape[1]).unsqueeze(0).repeat(src.shape[0], 1).cuda()
-        src = self.do((self.tok_embedding(src) * self.scale) + self.pos_embedding(pos))
+        src = self.tok_embedding(src)
         # src = [batch size, src sent len, hid dim]
 
         for layer in self.layers:
@@ -233,15 +197,14 @@ class Transformer(nn.Module):
 
         src = src.permute(0, 2, 1)
         src = self.proj(src)
-        src = src.permute(0, 2, 1)
-        src = src.squeeze(1)
+        src = src.squeeze(2)
         return self.predict(src)
 
 
-LR = 0.05
+LR = 0.01
 EPOCH = 3
 MAX_LENGTH = 10
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 
 vocb_size, word2idx, glove, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
 
@@ -258,18 +221,16 @@ train_loader = Data.DataLoader(dataset=train_set,
 
 model = Transformer(input_dim=vocb_size,
                     hid_dim=50,
-                    n_layers=3,
+                    n_layers=5,
                     n_heads=5,
-                    pf_dim=50,
                     encoder_layer=EncoderLayer,
                     self_attention=SelfAttention,
-                    positionwise_feedforward=PositionwiseFeedforward,
                     dropout=0.1,
                     glove=glove,
                     class_size=5,
                     max_length=MAX_LENGTH)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+optimizer = torch.optim.SGD(model.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
 print(model)
 model.cuda()
