@@ -1,7 +1,9 @@
 import pandas as pd
+import numpy as np
 import re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.data as Data
 
 
@@ -25,12 +27,6 @@ def vocab_list(phrase_data, word_set, is_test):
         phrase_list.append(temp)
 
     return phrase_list
-
-
-def transition(word_list):
-    word2idx = {word: idx + 1 for idx, word in enumerate(word_list)}
-    idx2word = {idx + 1: word for idx, word in enumerate(word_list)}
-    return word2idx, idx2word
 
 
 def encode_phrase(data, word2idx):
@@ -59,6 +55,21 @@ def pad_phrase(encode_data, max_length):
     return pad_encode_data
 
 
+def get_glove(words_set):
+    glove = torch.zeros([len(words_set) + 1, 50])
+    word2idx = {}
+    word2idx['<unk>'] = 0
+    idx = 1
+    with open("./glove/glove.6B.50d.txt") as glove_file:
+        for line in glove_file:
+            temp = line.split()
+            if temp[0] in words_set:
+                glove[idx] = torch.from_numpy(np.array(temp[1:]).astype(np.float))
+                word2idx[temp[0]] = idx
+                idx = idx + 1
+    return word2idx, glove[:idx, :]
+
+
 def precess_dataset(max_length):
     train_dataset = pd.read_csv("./dataset/train.tsv", sep='\t')
     test_dataset = pd.read_csv("./dataset/test.tsv", sep='\t')
@@ -79,49 +90,161 @@ def precess_dataset(max_length):
     validation_words = vocab_list(validation_phrase, word_set, False)
     test_words = vocab_list(test_phrase, word_set, True)
 
-    word_size = len(word_set) + 1
-
-    word2idx, idx2word = transition(word_set)
+    word2idx, glove = get_glove(word_set)
 
     train_x = pad_phrase(encode_phrase(train_words, word2idx), max_length)
     validation_x = pad_phrase(encode_phrase(validation_words, word2idx), max_length)
     test_x = pad_phrase(encode_phrase(test_words, word2idx), max_length)
 
-    return word_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x
+    return len(word2idx), word2idx, glove, train_x, validation_x, train_y, validation_y, test_x
 
 
-class MySA(nn.Module):
-    def __init__(self, vocb_size, emd_dim, hidden_size, num_layers, dropout, class_size):
-        super(MySA, self).__init__()
+class SelfAttention(nn.Module):
+    def __init__(self, input_dim, hid_dim, n_heads):
+        super().__init__()
 
-        self.embedding = nn.Embedding(vocb_size, emd_dim)
-        self.lstm = nn.LSTM(input_size=emd_dim,
-                            hidden_size=hidden_size,
-                            num_layers=num_layers,
-                            dropout=dropout,
-                            bidirectional=True)
-        self.liner = nn.Linear(hidden_size * 4, hidden_size)
-        self.dropout = nn.Dropout(0.5)
-        self.relu = nn.ReLU(hidden_size)
-        self.predict = nn.Linear(hidden_size, class_size)
+        self.input_dim = input_dim
+        self.hid_dim = hid_dim
+        self.n_heads = n_heads
+        self.num_heads = self.hid_dim // self.n_heads
 
-    def forward(self, inputs):
-        embed = self.embedding(inputs)
-        status, hidden = self.lstm(embed.permute(1, 0, 2))
-        encode = torch.cat((status[0], status[-1]), dim=1)
-        out = self.liner(encode)
-        out = self.dropout(out)
-        out = self.relu(out)
-        out = self.predict(out)
-        return out
+        assert hid_dim % n_heads == 0
+
+        self.w_q = nn.Linear(input_dim, hid_dim)
+        self.w_k = nn.Linear(input_dim, hid_dim)
+        self.w_v = nn.Linear(input_dim, hid_dim)
+
+        self.fc = nn.Linear(hid_dim, hid_dim)
+        self.scale = torch.sqrt(torch.FloatTensor([hid_dim // n_heads]))
+
+    def forward(self, query, key, value):
+        bsz = query.shape[0]
+        # query = key = value [batch size, sent len, hid dim]
+
+        Q = self.w_q(query)
+        K = self.w_k(key)
+        V = self.w_v(value)
+        # Q, K, V = [batch size, sent len, hid dim]
+
+        Q = Q.view(bsz, -1, self.n_heads, self.num_heads).permute(0, 2, 1, 3)
+        K = K.view(bsz, -1, self.n_heads, self.num_heads).permute(0, 2, 1, 3)
+        V = V.view(bsz, -1, self.n_heads, self.num_heads).permute(0, 2, 1, 3)
+        # Q, K, V = [batch size, n heads, sent len, num_heads]
+
+        energy = torch.matmul(Q, K.permute(0, 1, 3, 2)) / self.scale.cuda()
+        # energy = [batch size, n heads, sent len, sent len]
+
+        attention = F.softmax(energy, dim=-1)
+        # attention = [batch size, n heads, sent len, sent len]
+
+        x = torch.matmul(attention, V)
+        # x = [batch size, n heads, sent len, num_heads]
+
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # x = [batch size, sent len, n heads, num_heads]
+
+        x = x.view(bsz, -1, self.n_heads * self.num_heads)
+        # x = [batch size, src sent len, hid dim]
+
+        x = self.fc(x)
+        # x = [batch size, sent len, hid dim]
+        return x
 
 
-LR = 0.01
+class PositionwiseFeedforward(nn.Module):
+    def __init__(self, hid_dim, pf_dim, dropout):
+        super().__init__()
+
+        self.hid_dim = hid_dim
+        self.pf_dim = pf_dim
+
+        self.fc_1 = nn.Conv1d(hid_dim, pf_dim, 1)
+        self.fc_2 = nn.Conv1d(pf_dim, hid_dim, 1)
+
+        self.do = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x = [batch size, sent len, hid dim]
+        x = x.permute(0, 2, 1)
+        # x = [batch size, hid dim, sent len]
+
+        x = self.do(F.relu(self.fc_1(x)))
+        # x = [batch size, ff dim, sent len]
+
+        x = self.fc_2(x)
+        # x = [batch size, hid dim, sent len]
+
+        x = x.permute(0, 2, 1)
+        # x = [batch size, sent len, hid dim]
+        return x
+
+
+class EncoderLayer(nn.Module):
+    def __init__(self, hid_dim, n_heads, pf_dim, self_attention, positionwise_feedforward, dropout):
+        super().__init__()
+        self.ln = nn.LayerNorm(hid_dim)
+        self.sa = self_attention(hid_dim, hid_dim, n_heads)
+        self.pf = positionwise_feedforward(hid_dim, pf_dim, dropout)
+        self.do = nn.Dropout(dropout)
+
+    def forward(self, src):
+        # src = [batch size, src sent len, hid dim]
+        # src_mask = [batch size, src sent len]
+        src = self.ln(src + self.do(self.sa(src, src, src)))
+        src = self.ln(src + self.do(self.pf(src)))
+        return src
+
+
+class Transformer(nn.Module):
+    def __init__(self, input_dim, hid_dim, n_layers, n_heads, pf_dim, encoder_layer, self_attention,
+                 positionwise_feedforward, dropout, glove, class_size, max_length):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.hid_dim = hid_dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.pf_dim = pf_dim
+        self.scale = torch.sqrt(torch.FloatTensor([hid_dim])).cuda()
+        self.encoder_layer = encoder_layer
+        self.self_attention = self_attention
+        self.positionwise_feedforward = positionwise_feedforward
+        self.dropout = dropout
+
+        self.tok_embedding = nn.Embedding.from_pretrained(glove, freeze=False)
+        self.pos_embedding = nn.Embedding(max_length, hid_dim)
+
+        self.layers = nn.ModuleList(
+            [encoder_layer(hid_dim, n_heads, pf_dim, self_attention, positionwise_feedforward, dropout)
+             for i in range(n_layers)])
+
+        self.do = nn.Dropout(dropout)
+        self.proj = nn.Linear(max_length, 1)
+        self.predict = nn.Linear(hid_dim, class_size)
+
+    def forward(self, src):
+        # src = [batch size, src sent len]
+        pos = torch.arange(0, src.shape[1]).unsqueeze(0).repeat(src.shape[0], 1).cuda()
+        src = self.do((self.tok_embedding(src) * self.scale) + self.pos_embedding(pos))
+        # src = [batch size, src sent len, hid dim]
+
+        for layer in self.layers:
+            src = layer(src)
+
+        src = src.permute(0, 2, 1)
+        src = self.proj(src)
+        src = src.permute(0, 2, 1)
+        src = src.squeeze(1)
+        return self.predict(src)
+
+
+LR = 0.05
 EPOCH = 3
-MAX_LENGTH = 32
-BATCH_SIZE = 128
+MAX_LENGTH = 10
+BATCH_SIZE = 64
 
-vocb_size, word2idx, idx2word, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
+vocb_size, word2idx, glove, train_x, validation_x, train_y, validation_y, test_x = precess_dataset(MAX_LENGTH)
+
 train_x = torch.LongTensor(train_x)
 train_y = torch.tensor(train_y)
 validation_x = torch.LongTensor(validation_x)
@@ -133,16 +256,23 @@ train_loader = Data.DataLoader(dataset=train_set,
                                batch_size=BATCH_SIZE,
                                shuffle=True)
 
-mySA = MySA(vocb_size=vocb_size,
-            emd_dim=50,
-            hidden_size=32,
-            num_layers=2,
-            dropout=0.1,
-            class_size=5)
-optimizer = torch.optim.Adam(mySA.parameters(), lr=LR)
+model = Transformer(input_dim=vocb_size,
+                    hid_dim=50,
+                    n_layers=3,
+                    n_heads=5,
+                    pf_dim=50,
+                    encoder_layer=EncoderLayer,
+                    self_attention=SelfAttention,
+                    positionwise_feedforward=PositionwiseFeedforward,
+                    dropout=0.1,
+                    glove=glove,
+                    class_size=5,
+                    max_length=MAX_LENGTH)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
-print(mySA)
-mySA.cuda()
+print(model)
+model.cuda()
 loss_func.cuda()
 
 for epoch in range(EPOCH):
@@ -150,26 +280,26 @@ for epoch in range(EPOCH):
         x = x.cuda()
         y = y.cuda()
 
-        pred_train = mySA(x)
+        pred_train = model(x)
         loss = loss_func(pred_train, y)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         if idx % 100 == 0:
-            mySA.eval()
+            model.eval()
             validation_x = validation_x.cuda()
             validation_y = validation_y.cuda()
 
-            pred_validation = mySA(validation_x)
+            pred_validation = model(validation_x)
             pred_output = torch.max(pred_validation, dim=1)[1]
             accuracy = float(torch.sum(pred_output == validation_y)) / float(validation_y.size(0))
             print('Epoch: ', epoch, '| train loss: %.4f' % loss.item(), '| validation accuracy: %.4f' % accuracy)
-            mySA.train()
+            model.train()
 
-mySA.eval()
+model.eval()
 test_x = test_x.cuda()
-pred_test = mySA(test_x)
+pred_test = model(test_x)
 
 pred_output = torch.max(pred_test, dim=1)[1]
 pred_output = pred_output.type(torch.int32)

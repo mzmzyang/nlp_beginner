@@ -134,11 +134,11 @@ train_loader = Data.DataLoader(dataset=train_set,
                                shuffle=True)
 
 model = myLSTM(vocb_size=vocb_size,
-            emd_dim=50,
-            hidden_size=32,
-            num_layers=2,
-            dropout=0.1,
-            class_size=5)
+               emd_dim=50,
+               hidden_size=32,
+               num_layers=2,
+               dropout=0.1,
+               class_size=5)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 loss_func = nn.CrossEntropyLoss()
 print(model)
