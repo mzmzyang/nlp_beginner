@@ -185,7 +185,8 @@ class Transformer(nn.Module):
 
         self.do = nn.Dropout(dropout)
         self.proj = nn.Linear(max_length, 1)
-        self.predict = nn.Linear(hid_dim, class_size)
+        self.predict1 = nn.Linear(hid_dim, class_size * 2)
+        self.predict2 = nn.Linear(class_size * 2, class_size)
 
     def forward(self, src):
         # src = [batch size, src sent len]
@@ -198,7 +199,9 @@ class Transformer(nn.Module):
         src = src.permute(0, 2, 1)
         src = self.proj(src)
         src = src.squeeze(2)
-        return self.predict(src)
+        src = F.relu(self.predict1(src))
+        src = self.predict2(src)
+        return src
 
 
 LR = 0.01
